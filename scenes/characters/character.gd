@@ -4,17 +4,20 @@ class_name Character
 const GRAVITY := 600.0
 
 @export var damage: int
+@export var duration_grounded: float
 @export var jump_intensity: float 
 @export var knockback_intensity: float
+@export var knockdown_intensity: float
 @export var max_health: int
 @export var speed: float
 
 @onready var animation_player = $AnimationPlayer
 @onready var character_sprite = $CharacterSprite
+@onready var collision_shape = $CollisionShape2D
 @onready var damage_emitter = $DamageEmitter
 @onready var damage_receiver = $DamageReceiver
 
-enum State {IDLE, WALK, ATTACK, TAKEOFF, JUMP, LAND, JUMPKICK, HURT}
+enum State {IDLE, WALK, ATTACK, TAKEOFF, JUMP, LAND, JUMPKICK, HURT, FALL, GROUNDED}
 
 var anim_map := {
 	State.IDLE: "idle",
@@ -24,18 +27,21 @@ var anim_map := {
 	State.JUMP: "jump",
 	State.LAND: "land",
 	State.JUMPKICK: "jumpkick",
-	State.HURT: "hurt"
+	State.HURT: "hurt",
+	State.FALL: "fall",
+	State.GROUNDED: "grounded"
 }
 
 var current_health := 0
 var height: float = 0.0
 var height_speed: float = 0.0
 var state = State.IDLE
+var time_since_grounded := Time.get_ticks_msec()
 
 
 func _ready() -> void:
 	damage_emitter.area_entered.connect(on_emit_damage.bind())
-	damage_receiver.damage_receiver.connect(on_receive_damage.bind())
+	damage_receiver.damage_received.connect(on_receive_damage.bind())
 	current_health = max_health
 
 
@@ -44,8 +50,10 @@ func _process(delta: float) -> void:
 	handle_movement()
 	handle_animations()
 	handle_air_time(delta)
+	handle_grounded()
 	flip_sprites()
 	character_sprite.position = Vector2.UP * height
+	collision_shape.disabled = state == State.GROUNDED
 	move_and_slide()
 
 
@@ -63,6 +71,11 @@ func handle_input() -> void:
 	pass
 	
 	
+func handle_grounded() -> void:
+	if state == State.GROUNDED and (Time.get_ticks_msec() - time_since_grounded > duration_grounded):
+		state = State.LAND
+	
+	
 func handle_animations() -> void:
 	var anim = anim_map.get(state)
 	if animation_player.has_animation(anim):
@@ -70,11 +83,16 @@ func handle_animations() -> void:
 		
 		
 func handle_air_time(delta: float) -> void:
-	if state == State.JUMP or state == State.JUMPKICK:
+	if [State.JUMP, State.JUMPKICK, State.FALL].has(state):
 		height += height_speed * delta
 		if height < 0:
 			height = 0
-			state = State.LAND
+			if state == State.FALL:
+				state = State.GROUNDED
+				time_since_grounded = Time.get_ticks_msec()
+			else:
+				state = State.LAND
+			velocity = Vector2.ZERO
 		else:
 			height_speed -= GRAVITY * delta
 
@@ -118,16 +136,19 @@ func on_land_complet() -> void:
 	state = State.IDLE
 	
 	
-func on_receive_damage(damage: int, direction: Vector2) -> void:
-	current_health = clamp(current_health - damage, 0, max_health)
-	if current_health <= 0:
-		queue_free()
+func on_receive_damage(amount: int, direction: Vector2, hit_type: DamageReceiver.HitType) -> void:
+	current_health = clamp(current_health - amount, 0, max_health)
+	if current_health == 0 or hit_type == DamageReceiver.HitType.KNOCKDOWN:
+		state = State.FALL
+		height_speed = knockdown_intensity
 	else:
 		state = State.HURT
-		velocity = direction * knockback_intensity
+	velocity = direction * knockback_intensity
 	
 
-func on_emit_damage(damage_receiver: DamageReceiver) -> void:
-	var direction = Vector2.LEFT if damage_receiver.global_position.x < global_position.x else Vector2.RIGHT
-	damage_receiver.damage_receiver.emit(damage, direction)
-	print(damage_receiver)
+func on_emit_damage(receiver: DamageReceiver) -> void:
+	var hit_type := DamageReceiver.HitType.NORMAL
+	var direction = Vector2.LEFT if receiver.global_position.x < global_position.x else Vector2.RIGHT
+	if state == State.JUMPKICK:
+		hit_type = DamageReceiver.HitType.KNOCKDOWN
+	receiver.damage_received.emit(damage, direction, hit_type)
